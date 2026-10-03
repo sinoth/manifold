@@ -569,6 +569,24 @@ ManifoldMeshGL64* manifold_meshgl64_merge(void* mem, ManifoldMeshGL64* m) {
   return to_c(duplicate);
 }
 
+void manifold_meshgl_set_face_id(ManifoldMeshGL* m, uint32_t* face_id,
+                                 size_t length) {
+  from_c(m)->faceID = vector_of_array(face_id, length);
+}
+
+void manifold_meshgl_set_tolerance(ManifoldMeshGL* m, float tolerance) {
+  from_c(m)->tolerance = tolerance;
+}
+
+void manifold_meshgl64_set_face_id(ManifoldMeshGL64* m, uint64_t* face_id,
+                                   size_t length) {
+  from_c(m)->faceID = vector_of_array(face_id, length);
+}
+
+void manifold_meshgl64_set_tolerance(ManifoldMeshGL64* m, double tolerance) {
+  from_c(m)->tolerance = tolerance;
+}
+
 size_t manifold_meshgl_num_prop(ManifoldMeshGL* m) {
   return from_c(m)->numProp;
 }

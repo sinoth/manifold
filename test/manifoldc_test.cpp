@@ -1,6 +1,9 @@
 #include "manifold/manifoldc.h"
 
+#include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <vector>
 #ifndef MANIFOLD_NO_IOSTREAM
 #include <fstream>
 #endif
@@ -588,6 +591,212 @@ TEST(CBIND, meshgl64_merge_returns_mem) {
   free(result);
   free(mem);
   free(original);
+  free(cube);
+}
+
+// Rebuilds m's mesh from raw arrays, as an FFI caller would, and tags each
+// triangle with faceID = firstFaceID + triangle index.
+ManifoldMeshGL* meshgl_with_face_ids(ManifoldManifold* m,
+                                     uint32_t firstFaceID) {
+  ManifoldMeshGL* src = manifold_get_meshgl(alloc_meshgl_buffer(), m);
+  const size_t nVert = manifold_meshgl_num_vert(src);
+  const size_t nProp = manifold_meshgl_num_prop(src);
+  const size_t nTri = manifold_meshgl_num_tri(src);
+  float* props = manifold_meshgl_vert_properties(
+      malloc(manifold_meshgl_vert_properties_length(src) * sizeof(float)),
+      src);
+  uint32_t* tris = manifold_meshgl_tri_verts(
+      malloc(manifold_meshgl_tri_length(src) * sizeof(uint32_t)), src);
+
+  ManifoldMeshGL* mesh =
+      manifold_meshgl(alloc_meshgl_buffer(), props, nVert, nProp, tris, nTri);
+  std::vector<uint32_t> faceID(nTri);
+  std::iota(faceID.begin(), faceID.end(), firstFaceID);
+  manifold_meshgl_set_face_id(mesh, faceID.data(), faceID.size());
+
+  manifold_destruct_meshgl(src);
+  free(src);
+  free(props);
+  free(tris);
+  return mesh;
+}
+
+TEST(CBIND, meshgl_set_face_id) {
+  ManifoldManifold* cubeA = manifold_cube(alloc_manifold_buffer(), 1, 1, 1, 0);
+  ManifoldManifold* cubeB_tmp =
+      manifold_cube(alloc_manifold_buffer(), 1, 1, 1, 0);
+  ManifoldManifold* cubeB = manifold_translate(alloc_manifold_buffer(),
+                                               cubeB_tmp, 0.5, 0.5, 0.5);
+
+  ManifoldMeshGL* meshA = meshgl_with_face_ids(cubeA, 0);
+  ManifoldMeshGL* meshB = meshgl_with_face_ids(cubeB, 100);
+  const size_t nTriA = manifold_meshgl_num_tri(meshA);
+  const size_t nTriB = manifold_meshgl_num_tri(meshB);
+  EXPECT_EQ(manifold_meshgl_face_id_length(meshA), nTriA);
+
+  ManifoldManifold* a = manifold_of_meshgl(alloc_manifold_buffer(), meshA);
+  ManifoldManifold* b = manifold_of_meshgl(alloc_manifold_buffer(), meshB);
+  EXPECT_EQ(manifold_status(a), MANIFOLD_NO_ERROR);
+  EXPECT_EQ(manifold_status(b), MANIFOLD_NO_ERROR);
+
+  ManifoldManifold* diff = manifold_difference(alloc_manifold_buffer(), a, b);
+  EXPECT_EQ(manifold_status(diff), MANIFOLD_NO_ERROR);
+  EXPECT_NEAR(manifold_volume(diff), 1.0 - 0.125, 0.0001);
+
+  // Every output triangle should carry the faceID of the input triangle it
+  // came from, and the cut surface should come from cube B.
+  ManifoldMeshGL* out = manifold_get_meshgl(alloc_meshgl_buffer(), diff);
+  const size_t nOut = manifold_meshgl_face_id_length(out);
+  EXPECT_EQ(nOut, manifold_meshgl_num_tri(out));
+  uint32_t* outID =
+      manifold_meshgl_face_id(malloc(nOut * sizeof(uint32_t)), out);
+  bool fromA = false, fromB = false;
+  for (size_t i = 0; i < nOut; ++i) {
+    const bool inA = outID[i] < nTriA;
+    const bool inB = outID[i] >= 100 && outID[i] < 100 + nTriB;
+    EXPECT_TRUE(inA || inB) << "unexpected faceID " << outID[i];
+    fromA |= inA;
+    fromB |= inB;
+  }
+  EXPECT_TRUE(fromA);
+  EXPECT_TRUE(fromB);
+
+  // A faceID array of the wrong length is reported as an error.
+  ManifoldMeshGL* bad = meshgl_with_face_ids(cubeA, 0);
+  uint32_t shortID[3] = {0, 1, 2};
+  manifold_meshgl_set_face_id(bad, shortID, 3);
+  ManifoldManifold* badM = manifold_of_meshgl(alloc_manifold_buffer(), bad);
+  EXPECT_EQ(manifold_status(badM), MANIFOLD_FACE_ID_WRONG_LENGTH);
+
+  // Clearing the faceIDs with length 0 is valid.
+  manifold_meshgl_set_face_id(bad, nullptr, 0);
+  ManifoldManifold* cleared = manifold_of_meshgl(alloc_manifold_buffer(), bad);
+  EXPECT_EQ(manifold_status(cleared), MANIFOLD_NO_ERROR);
+
+  free(outID);
+  manifold_destruct_manifold(cleared);
+  manifold_destruct_manifold(badM);
+  manifold_destruct_meshgl(bad);
+  manifold_destruct_meshgl(out);
+  manifold_destruct_manifold(diff);
+  manifold_destruct_manifold(b);
+  manifold_destruct_manifold(a);
+  manifold_destruct_meshgl(meshB);
+  manifold_destruct_meshgl(meshA);
+  manifold_destruct_manifold(cubeB);
+  manifold_destruct_manifold(cubeB_tmp);
+  manifold_destruct_manifold(cubeA);
+  free(cleared);
+  free(badM);
+  free(bad);
+  free(out);
+  free(diff);
+  free(b);
+  free(a);
+  free(meshB);
+  free(meshA);
+  free(cubeB);
+  free(cubeB_tmp);
+  free(cubeA);
+}
+
+// MeshGL.tolerance is only read by Merge(), as the weld radius, so check that
+// a larger tolerance closes a seam whose two sides are slightly apart.
+TEST(CBIND, meshgl_set_tolerance) {
+  ManifoldManifold* cube = manifold_cube(alloc_manifold_buffer(), 1, 1, 1, 0);
+  ManifoldMeshGL* src = manifold_get_meshgl(alloc_meshgl_buffer(), cube);
+  ASSERT_EQ(manifold_meshgl_num_prop(src), 3);
+  const size_t nVert = manifold_meshgl_num_vert(src);
+  const size_t nTri = manifold_meshgl_num_tri(src);
+  std::vector<float> props(3 * (nVert + 1));
+  manifold_meshgl_vert_properties(props.data(), src);
+  std::vector<uint32_t> tris(3 * nTri);
+  manifold_meshgl_tri_verts(tris.data(), src);
+
+  // Split vertex 0: one triangle uses a copy offset by 1e-3, opening edges.
+  props[3 * nVert] = props[0] + 1e-3f;
+  props[3 * nVert + 1] = props[1];
+  props[3 * nVert + 2] = props[2];
+  for (uint32_t& v : tris) {
+    if (v == 0) {
+      v = nVert;
+      break;
+    }
+  }
+
+  for (const float tol : {0.0f, 0.01f}) {
+    ManifoldMeshGL* mesh =
+        manifold_meshgl(alloc_meshgl_buffer(), props.data(), nVert + 1, 3,
+                        tris.data(), nTri);
+    manifold_meshgl_set_tolerance(mesh, tol);
+    EXPECT_EQ(manifold_meshgl_tolerance(mesh), tol);
+
+    ManifoldMeshGL* merged = manifold_meshgl_merge(alloc_meshgl_buffer(), mesh);
+    ManifoldManifold* m = manifold_of_meshgl(alloc_manifold_buffer(), merged);
+    EXPECT_EQ(manifold_status(m),
+              tol > 0 ? MANIFOLD_NO_ERROR : MANIFOLD_NOT_MANIFOLD)
+        << "tolerance " << tol;
+
+    manifold_destruct_manifold(m);
+    manifold_destruct_meshgl(merged);
+    manifold_destruct_meshgl(mesh);
+    free(m);
+    free(merged);
+    free(mesh);
+  }
+
+  manifold_destruct_meshgl(src);
+  manifold_destruct_manifold(cube);
+  free(src);
+  free(cube);
+}
+
+TEST(CBIND, meshgl64_set_face_id_and_tolerance) {
+  ManifoldManifold* cube = manifold_cube(alloc_manifold_buffer(), 1, 1, 1, 0);
+  ManifoldMeshGL64* src = manifold_get_meshgl64(alloc_meshgl64_buffer(), cube);
+  const size_t nVert = manifold_meshgl64_num_vert(src);
+  const size_t nProp = manifold_meshgl64_num_prop(src);
+  const size_t nTri = manifold_meshgl64_num_tri(src);
+  double* props = manifold_meshgl64_vert_properties(
+      malloc(manifold_meshgl64_vert_properties_length(src) * sizeof(double)),
+      src);
+  uint64_t* tris = manifold_meshgl64_tri_verts(
+      malloc(manifold_meshgl64_tri_length(src) * sizeof(uint64_t)), src);
+
+  ManifoldMeshGL64* mesh = manifold_meshgl64(alloc_meshgl64_buffer(), props,
+                                             nVert, nProp, tris, nTri);
+  std::vector<uint64_t> faceID(nTri);
+  std::iota(faceID.begin(), faceID.end(), 1000);
+  manifold_meshgl64_set_face_id(mesh, faceID.data(), faceID.size());
+  manifold_meshgl64_set_tolerance(mesh, 0.01);
+  EXPECT_EQ(manifold_meshgl64_face_id_length(mesh), nTri);
+  EXPECT_EQ(manifold_meshgl64_tolerance(mesh), 0.01);
+
+  ManifoldManifold* m = manifold_of_meshgl64(alloc_manifold_buffer(), mesh);
+  EXPECT_EQ(manifold_status(m), MANIFOLD_NO_ERROR);
+
+  // No Boolean, so the same faceIDs come back (in a possibly different order).
+  ManifoldMeshGL64* out = manifold_get_meshgl64(alloc_meshgl64_buffer(), m);
+  const size_t nOut = manifold_meshgl64_face_id_length(out);
+  ASSERT_EQ(nOut, nTri);
+  uint64_t* outID =
+      manifold_meshgl64_face_id(malloc(nOut * sizeof(uint64_t)), out);
+  std::vector<uint64_t> sorted(outID, outID + nOut);
+  std::sort(sorted.begin(), sorted.end());
+  EXPECT_EQ(sorted, faceID);
+
+  free(outID);
+  manifold_destruct_meshgl64(out);
+  manifold_destruct_manifold(m);
+  manifold_destruct_meshgl64(mesh);
+  manifold_destruct_meshgl64(src);
+  manifold_destruct_manifold(cube);
+  free(out);
+  free(m);
+  free(mesh);
+  free(src);
+  free(props);
+  free(tris);
   free(cube);
 }
 

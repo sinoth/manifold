@@ -80,6 +80,21 @@ ManifoldMeshGL64* manifold_get_meshgl64_w_normals(void* mem,
 ManifoldMeshGL64* manifold_meshgl64_copy(void* mem, ManifoldMeshGL64* m);
 ManifoldMeshGL64* manifold_meshgl64_merge(void* mem, ManifoldMeshGL64* m);
 
+// Mesh Input Setters
+// Unlike most functions here, these modify the given MeshGL in place rather
+// than writing a new one into caller-provided memory. Set fields before
+// passing the mesh to manifold_of_meshgl / manifold_meshgl_merge. face_id must
+// contain one entry per triangle (or be empty, length 0), otherwise
+// constructing a Manifold reports MANIFOLD_FACE_ID_WRONG_LENGTH. tolerance is
+// the weld radius used by manifold_meshgl_merge; manifold_of_meshgl ignores it.
+
+void manifold_meshgl_set_face_id(ManifoldMeshGL* m, uint32_t* face_id,
+                                 size_t length);
+void manifold_meshgl_set_tolerance(ManifoldMeshGL* m, float tolerance);
+void manifold_meshgl64_set_face_id(ManifoldMeshGL64* m, uint64_t* face_id,
+                                   size_t length);
+void manifold_meshgl64_set_tolerance(ManifoldMeshGL64* m, double tolerance);
+
 // SDF
 // By default, the execution policy (sequential or parallel) of
 // manifold_level_set will be chosen automatically depending on the size of the
